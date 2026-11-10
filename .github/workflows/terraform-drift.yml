@@ -1,0 +1,95 @@
+# Workflow reutilizável: plan agendado que abre (ou atualiza) uma issue
+# quando a infraestrutura real diverge do código na main.
+#
+# Usa a role github-drift (somente leitura, via OIDC) e -lock=false:
+# a checagem nunca bloqueia um apply do Atlantis.
+name: terraform-drift
+
+on:
+  workflow_call:
+    inputs:
+      diretorios:
+        type: string
+        required: true
+      terraform_version:
+        type: string
+        default: "1.17.1"
+      role_arn:
+        type: string
+        default: arn:aws:iam::907079643427:role/github-drift
+      aws_region:
+        type: string
+        default: us-east-1
+
+permissions:
+  contents: read
+  id-token: write
+  issues: write
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: ${{ fromJSON(inputs.diretorios) }}
+    defaults:
+      run:
+        working-directory: ${{ matrix.dir }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ inputs.role_arn }}
+          aws-region: ${{ inputs.aws_region }}
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+          terraform_wrapper: false
+      - run: terraform init -input=false -lockfile=readonly
+      - name: plan
+        id: plan
+        env:
+          # Já estamos na role de leitura; não assume a role de execução.
+          TF_VAR_assume_role_arn: ""
+        run: |
+          set +e
+          terraform plan -input=false -no-color -lock=false -detailed-exitcode > plan.txt 2>&1
+          codigo=$?
+          set -e
+          cat plan.txt
+          echo "codigo=$codigo" >> "$GITHUB_OUTPUT"
+          # 0 = sem mudança, 2 = drift, 1 = erro
+          [ "$codigo" -ne 1 ]
+      - name: abre ou atualiza issue
+        if: steps.plan.outputs.codigo == '2'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          DIR: ${{ matrix.dir }}
+        with:
+          script: |
+            const fs = require('fs');
+            const dir = process.env.DIR;
+            const plan = fs.readFileSync(`${dir}/plan.txt`, 'utf8');
+            const inicio = plan.indexOf('Terraform will perform');
+            const trecho = (inicio >= 0 ? plan.slice(inicio) : plan).slice(0, 60000);
+            const titulo = `Drift detectado: ${dir}`;
+            const corpo = [
+              `O plan agendado encontrou diferença entre a \`main\` e a infraestrutura real em \`${dir}\`.`,
+              '',
+              `Execução: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              '',
+              '```hcl', trecho, '```',
+              '',
+              'Corrija abrindo um PR (para trazer o código para a realidade) ou rodando `atlantis plan` num PR vazio para desfazer a mudança manual.',
+            ].join('\n');
+
+            const { data: abertas } = await github.rest.issues.listForRepo({
+              ...context.repo, state: 'open', labels: 'drift',
+            });
+            const existente = abertas.find(i => i.title === titulo);
+            if (existente) {
+              await github.rest.issues.createComment({ ...context.repo, issue_number: existente.number, body: corpo });
+            } else {
+              await github.rest.issues.create({ ...context.repo, title: titulo, body: corpo, labels: ['drift'] });
+            }

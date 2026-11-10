@@ -1,0 +1,94 @@
+# Workflow reutilizável: checagens rápidas que rodam em todo PR de Terraform,
+# ANTES do Atlantis gastar tempo com plan. Nenhum job aqui tem credencial de cloud.
+#
+# Uso:
+#   jobs:
+#     ci:
+#       uses: terraform-em-producao/.github/.github/workflows/terraform-ci.yml@v1
+#       with:
+#         diretorios: '["envs/dev", "envs/prod"]'
+name: terraform-ci
+
+on:
+  workflow_call:
+    inputs:
+      diretorios:
+        description: Lista JSON de diretórios raiz (ou módulos) para validar.
+        type: string
+        required: true
+      terraform_version:
+        type: string
+        default: "1.17.1"
+      rodar_testes:
+        description: Roda `terraform test` em cada diretório.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+          terraform_wrapper: false
+      - run: terraform fmt -check -recursive -diff
+
+  validate:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: ${{ fromJSON(inputs.diretorios) }}
+    defaults:
+      run:
+        working-directory: ${{ matrix.dir }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+          terraform_wrapper: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.terraform.d/plugin-cache
+          key: tf-plugins-${{ runner.os }}-${{ hashFiles(format('{0}/.terraform.lock.hcl', matrix.dir)) }}
+      - name: init (sem backend)
+        run: |
+          export TF_PLUGIN_CACHE_DIR="$HOME/.terraform.d/plugin-cache"
+          mkdir -p "$TF_PLUGIN_CACHE_DIR"
+          # Raiz tem lock file commitado: init não pode alterá-lo.
+          # Módulo não tem: quem resolve a versão é a raiz que o consome.
+          if [ -f .terraform.lock.hcl ]; then
+            terraform init -backend=false -input=false -lockfile=readonly
+          else
+            terraform init -backend=false -input=false
+          fi
+      - run: terraform validate -no-color
+      - uses: terraform-linters/setup-tflint@6ffdbaa3be476b3431f7275c26966ef32ff60337 # v6.3.2
+        with:
+          tflint_version: v0.66.0
+      - name: tflint
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          tflint --init --config "$GITHUB_WORKSPACE/.tflint.hcl"
+          tflint --config "$GITHUB_WORKSPACE/.tflint.hcl" --format compact
+      - name: terraform test
+        if: inputs.rodar_testes
+        run: terraform test -no-color
+
+  seguranca:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: trivy (misconfiguração em IaC)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: config
+          severity: HIGH,CRITICAL
+          exit-code: "1"
