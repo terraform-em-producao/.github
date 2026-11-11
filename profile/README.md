@@ -25,7 +25,7 @@ bootstrap ──► atlantis ──► groundwork ──► infra-live
 2. **Nenhuma credencial estática** — OIDC no GitHub Actions, task role no Atlantis.
 3. **Menor privilégio por stack** — o Atlantis assume uma role diferente para cada stack.
 4. **Tudo pinado** — `required_version`, providers com `.terraform.lock.hcl`, módulos por tag, actions por SHA.
-5. **Mudança só por pull request** — plan no PR, apply antes do merge, com aprovação.
+5. **Mudança só por pull request** — plan no PR, apply antes do merge.
 6. **Checagem antes do plan** — fmt, validate, tflint, trivy em segundos, sem credencial.
 7. **Policy as code** — regras da org avaliadas contra o plan, com override auditável.
 8. **States pequenos** — separados por ambiente e por domínio: plan rápido, raio de explosão pequeno.
